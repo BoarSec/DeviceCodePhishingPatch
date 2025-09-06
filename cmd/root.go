@@ -13,7 +13,7 @@ import (
 var (
 	noBanner bool
 	verbose  bool
-	version  = "1.0.1"
+	version  = "1.1.0"
 )
 
 var rootCmd = &cobra.Command{

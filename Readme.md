@@ -48,7 +48,7 @@ A demo video of the flow can be seen [here](#demo)
 Download appropriate binary from [Releases](https://github.com/denniskniep/DeviceCodePhishing/releases)
 or install via go using following command:
 ```shell
-go install github.com/denniskniep/DeviceCodePhishing@v1.0.1
+go install github.com/denniskniep/DeviceCodePhishing@v1.1.0
 ```
 
 ## Start the phishing server
@@ -98,7 +98,7 @@ go build main.go
 
 ## Run with Docker
 ```shell
-docker run -p 8080:8080 ghcr.io/denniskniep/device-code-phishing:v1.0.1
+docker run -p 8080:8080 ghcr.io/denniskniep/device-code-phishing:v1.1.0
 ```
 
 
