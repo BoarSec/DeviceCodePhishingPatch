@@ -1,12 +1,17 @@
 # DeviceCodePhishing
 
 ## TL;DR;
+EDIT 19.09.2025: Microsoft fixed it for normal Entra tenants, but still possible for federated Entra tenants. 
+
 This is a novel technique that leverages the well-known Device Code phishing approach. 
 It dynamically initiates the flow as soon as the victim opens the phishing link and instantly redirects them to the authentication page.
 A headless browser automates this by directly entering the generated Device Code into the webpage behind the scenes. 
 This defeats the 10-minute token validity limitation and eliminates the need for the victim to manually perform these steps, elevating the efficiency of the attack to a new level.  
 What makes Device Code phishing especially dangerous is that no authentication method, not even FIDO, is able to protect against this type of attack. 
 Additionally, the victim interacts with the original website they expect, making it impossible to detect the attack based on a suspicious URL.
+
+## Edit: Does not work on normal Entra tenants anymore, but ...
+Federated Entra tenats are still affected by that technique. The application now executes a preflight check if the specified domain belongs to a tenant, that is federated. If yes execution continues and the user is redirected immediatly to the federated sign-in page. 
 
 ## Demo
 https://gist.github.com/user-attachments/assets/bf6d1c2d-7199-4394-824d-e6f57e8136a2
@@ -34,7 +39,7 @@ For more details, check out the blog post: [Phishing despite FIDO, leveraging a 
 1. The attacker sends a URL to the victim
 2. The victim opens that URL
 3. When the URL is opened, a headless browser is started, performing the following automated steps:
-   - Starts the Device Code Flow with `<tenant>` and `<clientId>`
+   - Starts the Device Code Flow with `<tenantDomain>` and `<clientId>`
    - Opens the device-code webpage and enters the corresponding user-code
    - The device-code webpage forwards to the URL for interactive authentication (By clicking on "Can't access your account" and immediately navigating back by clicking the cancel button, see [here](https://github.com/denniskniep/DeviceCodePhishing/blob/main/pkg/entra/devicecode.go#L101))
    - Returns the URL for interactive authentication as a redirect to the victim
@@ -52,14 +57,9 @@ go install github.com/denniskniep/DeviceCodePhishing@v1.1.0
 ```
 
 ## Start the phishing server
-
-By default, it runs with tenant set to `common` and with the AuthenticationBroker ClientId `29d9ed98-a469-4536-ade2-f981bc1d605e`
+Specify the TenantDomain with `--domain`. By default, it runs with the AuthenticationBroker ClientId `29d9ed98-a469-4536-ade2-f981bc1d605e`. Use the args if one want to define a different clientId or a custom userAgent
 ```shell
-DeviceCodePhishing server
-```
-Use the args if one want to define a specific tenant, a different clientId or a custom userAgent
-```shell
-DeviceCodePhishing server --tenant <tenantId> --client-id <clientId> --user-agent <userAgent> 
+DeviceCodePhishing server --domain <tenantDomain> --client-id <clientId> --user-agent <userAgent> 
 ```
 For further help on syntax or how to use arguments execute:
 ```shell
